@@ -45,6 +45,10 @@ class ClipView:
     non_robot_point_timeline: PointTimeline
     non_robot_flow_timeline: FlowTimeline
     initial_rgb: np.ndarray | None
+    source_demo_clean_start_frame: int
+    source_demo_clean_end_frame: int
+    source_traj_start_frame: int
+    source_traj_end_frame: int
     mean_final_displacement: float
     max_final_displacement: float
 
@@ -183,6 +187,10 @@ def _load_clip_view(
             colors = decoded.scene_colors
             robot_mask = decoded.scene_robot_mask
         initial_rgb = _decode_jpeg_dataset(camera["initial_rgb"]) if "initial_rgb" in camera else None
+        source_demo_clean_start_frame = int(clip.attrs.get("source_demo_clean_start_frame", -1))
+        source_demo_clean_end_frame = int(clip.attrs.get("source_demo_clean_end_frame", -1))
+        source_traj_start_frame = int(clip.attrs.get("source_traj_start_frame", -1))
+        source_traj_end_frame = int(clip.attrs.get("source_traj_end_frame", -1))
 
     if flows.ndim != 3 or flows.shape[-1] != 3:
         raise ValueError(f"scene_flows must be (T,N,3), got {flows.shape}")
@@ -229,6 +237,10 @@ def _load_clip_view(
         non_robot_point_timeline=non_robot_point_timeline,
         non_robot_flow_timeline=non_robot_flow_timeline,
         initial_rgb=initial_rgb,
+        source_demo_clean_start_frame=source_demo_clean_start_frame,
+        source_demo_clean_end_frame=source_demo_clean_end_frame,
+        source_traj_start_frame=source_traj_start_frame,
+        source_traj_end_frame=source_traj_end_frame,
         mean_final_displacement=float(displacement.mean()) if displacement.size else 0.0,
         max_final_displacement=float(displacement.max()) if displacement.size else 0.0,
     )
@@ -241,6 +253,8 @@ def _summary_markdown(h5_path: Path, clip: ClipView, frame: int) -> str:
         f"- Clip: `{clip.clip_key}`\n"
         f"- Camera: `{clip.camera_key}`\n"
         f"- Frame: `{frame}/{clip.num_frames - 1}`\n"
+        f"- demo_clean frames: `{clip.source_demo_clean_start_frame}-{clip.source_demo_clean_end_frame}`\n"
+        f"- _traj/control frames: `{clip.source_traj_start_frame}-{clip.source_traj_end_frame}`\n"
         f"- Points: `{clip.num_points}`\n"
         f"- Robot points: `{clip.num_robot_points}`\n"
         f"- Mean final displacement: `{clip.mean_final_displacement:.4f} m`\n"

@@ -37,9 +37,10 @@ data_type:
   actor_segmentation: false
   pointworld_behavior_online: true
 pointworld_camera: head_camera
-pointworld_clip_len: 15
-pointworld_stride: 15
-pointworld_min_object_motion: 0.005
+pointworld_clip_len: 16
+pointworld_stride: 10
+pointworld_frame_interval: 2
+pointworld_min_object_motion: 0.0
 pointworld_max_points_per_part: -1
 pcd_down_sample_num: 1024
 pcd_crop: true

@@ -106,8 +106,10 @@ class Base_Task(gym.Env):
         self.pointworld_online_writer = None
         self.pointworld_online_clip_len = int(kwags.get("pointworld_clip_len", 15))
         self.pointworld_online_stride = int(kwags.get("pointworld_stride", self.pointworld_online_clip_len))
+        self.pointworld_online_frame_interval = int(kwags.get("pointworld_frame_interval", 1))
         self.pointworld_online_camera = str(kwags.get("pointworld_camera", "head_camera"))
         self.pointworld_online_min_object_motion = float(kwags.get("pointworld_min_object_motion", 0.0))
+        self.pointworld_replay_step_idx = 0
         max_points_per_part = kwags.get("pointworld_max_points_per_part", None)
         self.pointworld_online_max_points_per_part = (
             None if max_points_per_part is None or int(max_points_per_part) <= 0 else int(max_points_per_part)
@@ -616,6 +618,12 @@ class Base_Task(gym.Env):
         }
 
         pkl_dic["observation"] = self.cameras.get_config()
+        if self.pointworld_behavior_online:
+            pkl_dic["frame_metadata"] = {
+                "demo_clean_frame_index": int(self.FRAME_IDX),
+                "traj_frame_index": int(self.pointworld_replay_step_idx),
+                "save_freq": int(self.save_freq) if self.save_freq is not None else -1,
+            }
         # rgb
         if self.data_type.get("rgb", False):
             rgb = self.cameras.get_rgb()
@@ -715,6 +723,7 @@ class Base_Task(gym.Env):
                     output_h5_path=target_file_path,
                     clip_len=self.pointworld_online_clip_len,
                     stride=self.pointworld_online_stride,
+                    frame_interval=self.pointworld_online_frame_interval,
                     camera_name=self.pointworld_online_camera,
                     min_object_motion=self.pointworld_online_min_object_motion,
                     max_points_per_part=self.pointworld_online_max_points_per_part,
@@ -1093,6 +1102,8 @@ class Base_Task(gym.Env):
                 now_right_id += 1
 
             self.scene.step()
+            if save_freq != None:
+                self.pointworld_replay_step_idx += 1
             if self.render_freq and i % self.render_freq == 0:
                 self._update_render()
                 self.viewer.render()
@@ -1686,6 +1697,8 @@ class Base_Task(gym.Env):
                 )  # TODO
 
             self.scene.step()
+            if save_freq != None:
+                self.pointworld_replay_step_idx += 1
 
             if self.render_freq and control_idx % self.render_freq == 0:
                 self._update_render()

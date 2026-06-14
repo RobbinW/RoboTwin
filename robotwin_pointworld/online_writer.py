@@ -28,6 +28,7 @@ class BehaviorCompactEpisodeWriter:
         output_h5_path: str | Path,
         clip_len: int = 15,
         stride: int = 15,
+        frame_interval: int = 1,
         camera_name: str = "head_camera",
         min_object_motion: float = 0.0,
         max_points_per_part: int | None = None,
@@ -41,17 +42,25 @@ class BehaviorCompactEpisodeWriter:
             raise ValueError("clip_len must be positive.")
         if self.stride <= 0:
             raise ValueError("stride must be positive.")
+        self.frame_interval = int(frame_interval)
+        if self.frame_interval <= 0:
+            raise ValueError("frame_interval must be positive.")
+        self.required_input_frames = (self.clip_len - 1) * self.frame_interval + 1
         self.camera_name = str(camera_name)
         self.min_object_motion = float(min_object_motion)
         self.max_points_per_part = max_points_per_part
         self.drop_actor_ids = tuple(int(v) for v in drop_actor_ids)
         self._frames: list[dict] = []
+        self._appended_frames = 0
         self._written = 0
         self._closed = False
         self._h5 = h5py.File(self.output_h5_path, "w")
         self._h5.attrs["domain"] = "robotwin"
         self._h5.attrs["format"] = "behavior_compact"
         self._h5.attrs["camera_name"] = self.camera_name
+        self._h5.attrs["clip_len"] = self.clip_len
+        self._h5.attrs["stride"] = self.stride
+        self._h5.attrs["frame_interval"] = self.frame_interval
         self._h5.attrs["episode_complete"] = False
 
     @property
@@ -61,9 +70,17 @@ class BehaviorCompactEpisodeWriter:
     def append(self, frame: dict) -> None:
         if self._closed:
             raise RuntimeError("Cannot append to a closed BehaviorCompactEpisodeWriter.")
+        frame = dict(frame)
+        metadata = dict(frame.get("frame_metadata", {}))
+        metadata.setdefault("demo_clean_frame_index", self._appended_frames)
+        metadata.setdefault("traj_frame_index", metadata["demo_clean_frame_index"])
+        metadata.setdefault("save_freq", -1)
+        frame["frame_metadata"] = metadata
+        self._appended_frames += 1
         self._frames.append(frame)
-        if len(self._frames) >= self.clip_len:
-            self._write_clip(self._frames[: self.clip_len])
+        while len(self._frames) >= self.required_input_frames:
+            sampled_frames = self._frames[: self.required_input_frames : self.frame_interval]
+            self._write_clip(sampled_frames)
             del self._frames[: self.stride]
 
     def close(self) -> None:
@@ -134,6 +151,7 @@ class BehaviorCompactEpisodeWriter:
 
         clip_key = f"{self.output_h5_path.stem}:clip{self._written:06d}"
         clip_group = self._h5.create_group(clip_key)
+        self._write_source_frame_metadata(clip_group, frames)
         extrinsic = _as_homogeneous_extrinsic(raw_camera["extrinsic_cv"]) @ base_world_traj[0]
         extrinsic_traj = np.asarray(
             [
@@ -187,6 +205,29 @@ class BehaviorCompactEpisodeWriter:
 
     def _advance_after_skip(self) -> None:
         return
+
+    def _write_source_frame_metadata(self, clip_group: h5py.Group, frames: list[dict]) -> None:
+        demo_indices = np.asarray(
+            [int(frame.get("frame_metadata", {}).get("demo_clean_frame_index", idx)) for idx, frame in enumerate(frames)],
+            dtype=np.int64,
+        )
+        traj_indices = np.asarray(
+            [int(frame.get("frame_metadata", {}).get("traj_frame_index", demo_indices[idx])) for idx, frame in enumerate(frames)],
+            dtype=np.int64,
+        )
+        save_freqs = np.asarray(
+            [int(frame.get("frame_metadata", {}).get("save_freq", -1)) for frame in frames],
+            dtype=np.int64,
+        )
+        clip_group.create_dataset("source_demo_clean_frame_indices", data=demo_indices, dtype=np.int64)
+        clip_group.create_dataset("source_traj_frame_indices", data=traj_indices, dtype=np.int64)
+        clip_group.create_dataset("source_save_freq", data=save_freqs, dtype=np.int64)
+        clip_group.attrs["source_demo_clean_start_frame"] = int(demo_indices[0]) if demo_indices.size else -1
+        clip_group.attrs["source_demo_clean_end_frame"] = int(demo_indices[-1]) if demo_indices.size else -1
+        clip_group.attrs["source_traj_start_frame"] = int(traj_indices[0]) if traj_indices.size else -1
+        clip_group.attrs["source_traj_end_frame"] = int(traj_indices[-1]) if traj_indices.size else -1
+        clip_group.attrs["source_frame_interval"] = int(self.frame_interval)
+        clip_group.attrs["source_clip_stride"] = int(self.stride)
 
     def _stack_robot_matrix(self, frames: list[dict], key: str, fallback: np.ndarray) -> np.ndarray:
         values = []

@@ -57,6 +57,11 @@ def _frame(t: int) -> dict:
             "left_endpose": np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
             "right_endpose": np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
         },
+        "frame_metadata": {
+            "demo_clean_frame_index": t,
+            "traj_frame_index": t * 15,
+            "save_freq": 15,
+        },
     }
 
 
@@ -86,3 +91,38 @@ def test_behavior_compact_episode_writer_streams_frames_to_compact_h5(tmp_path):
         np.testing.assert_allclose(decoded.scene_flows[-1, 0], [14.0, 0.0, -1.0])
         np.testing.assert_allclose(decoded.scene_flows[-1, 1], [2.0, 3.5, -1.0])
         np.testing.assert_allclose(decoded.scene_flows[-1, 2], [1.0, 0.0, -1.0])
+
+
+def test_behavior_compact_episode_writer_uses_frame_interval_and_source_metadata(tmp_path):
+    out_path = tmp_path / "episode0.hdf5"
+    writer = BehaviorCompactEpisodeWriter(
+        output_h5_path=out_path,
+        clip_len=4,
+        stride=2,
+        frame_interval=2,
+        camera_name="head_camera",
+        min_object_motion=0.0,
+    )
+
+    for t in range(9):
+        writer.append(_frame(t))
+    writer.close()
+
+    with h5py.File(out_path, "r") as f:
+        assert list(f.keys()) == ["episode0:clip000000", "episode0:clip000001"]
+
+        clip0 = f["episode0:clip000000"]
+        np.testing.assert_array_equal(clip0["source_demo_clean_frame_indices"][:], [0, 2, 4, 6])
+        np.testing.assert_array_equal(clip0["source_traj_frame_indices"][:], [0, 30, 60, 90])
+        assert clip0.attrs["source_demo_clean_start_frame"] == 0
+        assert clip0.attrs["source_demo_clean_end_frame"] == 6
+        assert clip0.attrs["source_traj_start_frame"] == 0
+        assert clip0.attrs["source_traj_end_frame"] == 90
+        assert clip0.attrs["source_frame_interval"] == 2
+        assert clip0.attrs["source_clip_stride"] == 2
+
+        clip1 = f["episode0:clip000001"]
+        np.testing.assert_array_equal(clip1["source_demo_clean_frame_indices"][:], [2, 4, 6, 8])
+        np.testing.assert_array_equal(clip1["source_traj_frame_indices"][:], [30, 60, 90, 120])
+        decoded = decode_behavior_online_camera_group(clip1["camera_head"])
+        assert decoded.scene_flows.shape == (4, 3, 3)
