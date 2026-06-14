@@ -8,7 +8,8 @@ envs/curobo
 *.zip
 viewer_show.*
 eval_video/
-task_config/
+task_config/*
+!task_config/pointworld_behavior_compact_head.yml
 **/.DS_Store
 
 # eval result

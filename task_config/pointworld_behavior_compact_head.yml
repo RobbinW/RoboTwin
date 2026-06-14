@@ -1,0 +1,49 @@
+# RoboTwin replay config for BEHAVIOR-style compact PointWorld GT flow.
+render_freq: 0
+episode_num: 1
+use_seed: true
+replay_source_config: demo_clean
+save_freq: 15
+embodiment: [aloha-agilex]
+language_num: 100
+domain_randomization:
+  random_background: false
+  cluttered_table: false
+  clean_background_rate: 1
+  random_head_camera_dis: 0
+  random_table_height: 0
+  random_light: false
+  crazy_random_light_rate: 0
+camera:
+  head_camera_type: D435
+  wrist_camera_type: D435
+  collect_head_camera: true
+  collect_wrist_camera: false
+  collect_camera_names: [head_camera]
+data_type:
+  rgb: true
+  third_view: false
+  depth: true
+  position: true
+  normal: true
+  pointcloud: false
+  observer: false
+  endpose: true
+  qpos: true
+  robot_state: true
+  object_pose: true
+  raw_segmentation: true
+  mesh_segmentation: false
+  actor_segmentation: false
+  pointworld_behavior_online: true
+pointworld_camera: head_camera
+pointworld_clip_len: 15
+pointworld_stride: 15
+pointworld_min_object_motion: 0.005
+pointworld_max_points_per_part: -1
+pcd_down_sample_num: 1024
+pcd_crop: true
+save_path: ./data
+clear_cache_freq: 1
+collect_data: true
+eval_video_log: true

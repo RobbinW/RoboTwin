@@ -36,7 +36,7 @@ def get_embodiment_config(robot_file):
     return embodiment_args
 
 
-def main(task_name=None, task_config=None):
+def main(task_name=None, task_config=None, start_seed=None, episode_num=None):
 
     task = class_decorator(task_name)
     config_path = f"./task_config/{task_config}.yml"
@@ -45,6 +45,9 @@ def main(task_name=None, task_config=None):
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     args['task_name'] = task_name
+    args["start_seed"] = start_seed
+    if episode_num is not None:
+        args["episode_num"] = episode_num
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -99,7 +102,12 @@ def main(task_name=None, task_config=None):
 
     args["embodiment_name"] = embodiment_name
     args['task_config'] = task_config
-    args["save_path"] = os.path.join(args["save_path"], str(args["task_name"]), args["task_config"])
+    save_root = args["save_path"]
+    args["save_path"] = os.path.join(save_root, str(args["task_name"]), args["task_config"])
+    replay_source_config = args.get("replay_source_config", None)
+    if replay_source_config:
+        args["replay_source_path"] = os.path.join(save_root, str(args["task_name"]), str(replay_source_config))
+        args["traj_source_dir"] = args["replay_source_path"]
     run(task, args)
 
 
@@ -110,6 +118,8 @@ def run(TASK_ENV, args):
 
     # =========== Collect Seed ===========
     os.makedirs(args["save_path"], exist_ok=True)
+    if args.get("start_seed") is not None:
+        epid = int(args["start_seed"])
 
     if not args["use_seed"]:
         print("\033[93m" + "[Start Seed and Pre Motion Data Collection]" + "\033[0m")
@@ -121,7 +131,8 @@ def run(TASK_ENV, args):
                 if len(seed_list) != 0:
                     seed_list = [int(i) for i in seed_list]
                     suc_num = len(seed_list)
-                    epid = max(seed_list) + 1
+                    if args.get("start_seed") is None:
+                        epid = max(seed_list) + 1
             print(f"Exist seed file, Start from: {epid} / {suc_num}")
 
         while suc_num < args["episode_num"]:
@@ -175,7 +186,8 @@ def run(TASK_ENV, args):
         print(f"\nComplete simulation, failed \033[91m{fail_num}\033[0m times / {epid} tries \n")
     else:
         print("\033[93m" + "Use Saved Seeds List".center(30, "-") + "\033[0m")
-        with open(os.path.join(args["save_path"], "seed.txt"), "r") as file:
+        seed_dir = args.get("replay_source_path", args["save_path"])
+        with open(os.path.join(seed_dir, "seed.txt"), "r") as file:
             seed_list = file.read().split()
             seed_list = [int(i) for i in seed_list]
 
@@ -219,6 +231,7 @@ def run(TASK_ENV, args):
                 info_db = json.load(file)
 
             info = TASK_ENV.play_once()
+            success = TASK_ENV.check_success()
             info_db[f"episode_{episode_idx}"] = info
 
             with open(info_file_path, "w", encoding="utf-8") as file:
@@ -227,7 +240,7 @@ def run(TASK_ENV, args):
             TASK_ENV.close_env(clear_cache=((episode_idx + 1) % clear_cache_freq == 0))
             TASK_ENV.merge_pkl_to_hdf5_video()
             TASK_ENV.remove_data_cache()
-            assert TASK_ENV.check_success(), "Collect Error"
+            assert success, "Collect Error"
 
         command = f"cd description && bash gen_episode_instructions.sh {args['task_name']} {args['task_config']} {args['language_num']}"
         os.system(command)
@@ -243,8 +256,13 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("task_name", type=str)
     parser.add_argument("task_config", type=str)
-    parser = parser.parse_args()
-    task_name = parser.task_name
-    task_config = parser.task_config
+    parser.add_argument("--start_seed", type=int, default=None, help="Start seed for new seed collection.")
+    parser.add_argument("--episode_num", type=int, default=None, help="Override episode_num from the task config.")
+    args = parser.parse_args()
 
-    main(task_name=task_name, task_config=task_config)
+    main(
+        task_name=args.task_name,
+        task_config=args.task_config,
+        start_seed=args.start_seed,
+        episode_num=args.episode_num,
+    )

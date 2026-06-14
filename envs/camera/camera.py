@@ -57,6 +57,8 @@ class Camera:
 
         self.collect_head_camera = kwags["camera"].get("collect_head_camera", True)
         self.collect_wrist_camera = kwags["camera"].get("collect_wrist_camera", True)
+        collect_camera_names = kwags["camera"].get("collect_camera_names", None)
+        self.collect_camera_names = None if collect_camera_names is None else set(collect_camera_names)
 
         # embodiment = kwags.get('embodiment')
         # embodiment_config_path = os.path.join(CONFIGS_PATH, '_embodiment_config.yml')
@@ -180,9 +182,15 @@ class Camera:
                     camera_info["forward"][0],
                 ] + [0]
 
+            if self.collect_camera_names is not None and camera_info["name"] not in self.collect_camera_names:
+                # Preserve RNG consumption from create_camera() so replay seeds remain comparable.
+                np.random.randn(3)
+                np.random.uniform(low=0, high=self.random_head_camera_dis if camera_info["name"] == "head_camera" else 0)
+                continue
+
             if camera_info["name"] == "head_camera":
                 if self.collect_head_camera:
-                    self.head_camera_id = i
+                    self.head_camera_id = len(self.static_camera_list)
                     camera_info["type"] = self.head_camera_type
                     # camera, sensor_camera, camera_config = create_camera(camera_info)
                     camera, camera_config = create_camera(camera_info,
@@ -408,6 +416,31 @@ class Camera:
                 res[camera_name][f"{level}_segmentation"] = _get_segmentation(camera, level=level)
         return res
 
+    def get_raw_segmentation(self, level="mesh") -> dict:
+
+        def _get_raw_segmentation(camera, level="mesh"):
+            seg_labels = camera.get_picture("Segmentation")
+            channel = 0 if level == "mesh" else 1
+            return seg_labels[..., channel].astype(np.int32)
+
+        res = {}
+
+        if self.collect_wrist_camera:
+            res["left_camera"] = {}
+            res["right_camera"] = {}
+            res["left_camera"][f"{level}_segmentation"] = _get_raw_segmentation(self.left_camera, level=level)
+            res["right_camera"][f"{level}_segmentation"] = _get_raw_segmentation(self.right_camera, level=level)
+
+        for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_name == "head_camera":
+                if self.collect_head_camera:
+                    res[camera_name] = {}
+                    res[camera_name][f"{level}_segmentation"] = _get_raw_segmentation(camera, level=level)
+            else:
+                res[camera_name] = {}
+                res[camera_name][f"{level}_segmentation"] = _get_raw_segmentation(camera, level=level)
+        return res
+
     # Get Camera Depth
     def get_depth(self) -> dict:
 
@@ -445,6 +478,52 @@ class Camera:
                 res[camera_name]["depth"] *= rgba[camera_name]["rgba"][:, :, 3] / 255
         # res['head_sensor']['depth'] = _get_sensor_depth(self.head_sensor)
 
+        return res
+
+    def get_position(self) -> dict:
+
+        def _get_position(camera):
+            return camera.get_picture("Position").astype(np.float32)
+
+        res = {}
+
+        if self.collect_wrist_camera:
+            res["left_camera"] = {}
+            res["right_camera"] = {}
+            res["left_camera"]["position"] = _get_position(self.left_camera)
+            res["right_camera"]["position"] = _get_position(self.right_camera)
+
+        for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_name == "head_camera":
+                if self.collect_head_camera:
+                    res[camera_name] = {}
+                    res[camera_name]["position"] = _get_position(camera)
+            else:
+                res[camera_name] = {}
+                res[camera_name]["position"] = _get_position(camera)
+        return res
+
+    def get_normal(self) -> dict:
+
+        def _get_normal(camera):
+            return camera.get_picture("Normal").astype(np.float32)
+
+        res = {}
+
+        if self.collect_wrist_camera:
+            res["left_camera"] = {}
+            res["right_camera"] = {}
+            res["left_camera"]["normal"] = _get_normal(self.left_camera)
+            res["right_camera"]["normal"] = _get_normal(self.right_camera)
+
+        for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_name == "head_camera":
+                if self.collect_head_camera:
+                    res[camera_name] = {}
+                    res[camera_name]["normal"] = _get_normal(camera)
+            else:
+                res[camera_name] = {}
+                res[camera_name]["normal"] = _get_normal(camera)
         return res
 
     # Get World PointCloud

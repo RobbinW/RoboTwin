@@ -62,9 +62,10 @@ class Base_Task(gym.Env):
         self.FRAME_IDX = 0
         self.task_name = kwags.get("task_name")
         self.save_dir = kwags.get("save_path", "data")
+        self.traj_source_dir = kwags.get("traj_source_dir", None)
         self.ep_num = kwags.get("now_ep_num", 0)
         self.render_freq = kwags.get("render_freq", 10)
-        self.data_type = kwags.get("data_type", None)
+        self.data_type = kwags.get("data_type", {}) or {}
         self.save_data = kwags.get("save_data", False)
         self.dual_arm = kwags.get("dual_arm", True)
         self.eval_mode = kwags.get("eval_mode", False)
@@ -101,11 +102,22 @@ class Base_Task(gym.Env):
 
         self.save_freq = kwags.get("save_freq")
         self.world_pcd = None
+        self.pointworld_behavior_online = bool(self.data_type.get("pointworld_behavior_online", False))
+        self.pointworld_online_writer = None
+        self.pointworld_online_clip_len = int(kwags.get("pointworld_clip_len", 15))
+        self.pointworld_online_stride = int(kwags.get("pointworld_stride", self.pointworld_online_clip_len))
+        self.pointworld_online_camera = str(kwags.get("pointworld_camera", "head_camera"))
+        self.pointworld_online_min_object_motion = float(kwags.get("pointworld_min_object_motion", 0.0))
+        max_points_per_part = kwags.get("pointworld_max_points_per_part", None)
+        self.pointworld_online_max_points_per_part = (
+            None if max_points_per_part is None or int(max_points_per_part) <= 0 else int(max_points_per_part)
+        )
 
         self.size_dict = list()
         self.cluttered_objs = list()
         self.prohibited_area = list()  # [x_min, y_min, x_max, y_max]
         self.record_cluttered_objects = list()  # record cluttered objects info
+        self.flow_actors = OrderedDict()
 
         self.eval_success = False
         self.table_z_bias = (np.random.uniform(low=-self.random_table_height, high=0) + table_height_bias)  # TODO
@@ -157,6 +169,165 @@ class Base_Task(gym.Env):
         self.info["info"] = {}
 
         self.stage_success_tag = False
+
+    def register_flow_actor(self, name, actor, include_links=True):
+        """Register a task object whose frame-0 visible pixels should become flow points."""
+        self.flow_actors[str(name)] = {
+            "actor": actor,
+            "include_links": bool(include_links),
+        }
+
+    @staticmethod
+    def _pose_to_wxyz_array(pose):
+        return np.asarray(pose.p.tolist() + pose.q.tolist(), dtype=np.float32)
+
+    @staticmethod
+    def _pose_to_matrix_array(pose):
+        return np.asarray(pose.to_transformation_matrix(), dtype=np.float32)
+
+    @staticmethod
+    def _bytes_array(values, width=128):
+        return np.asarray([str(v).encode("utf-8")[:width] for v in values], dtype=f"S{width}")
+
+    @staticmethod
+    def _safe_entity_id(entity):
+        return int(getattr(entity, "per_scene_id"))
+
+    @staticmethod
+    def _safe_name(name):
+        return re.sub(r"[^0-9A-Za-z_.-]+", "_", str(name)).strip("_") or "unnamed"
+
+    def _iter_auto_flow_actors(self):
+        skip_words = ("clutter", "table", "wall", "ground", "robot", "camera")
+        seen = set()
+
+        def maybe_yield(prefix, value):
+            if isinstance(value, (Actor, ArticulationActor)):
+                if id(value) not in seen:
+                    seen.add(id(value))
+                    yield self._safe_name(prefix), value
+            elif isinstance(value, (list, tuple)):
+                for idx, item in enumerate(value):
+                    yield from maybe_yield(f"{prefix}_{idx}", item)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    yield from maybe_yield(f"{prefix}_{key}", item)
+
+        for attr_name, value in vars(self).items():
+            lowered = attr_name.lower()
+            if attr_name.startswith("_") or any(word in lowered for word in skip_words):
+                continue
+            yield from maybe_yield(attr_name, value)
+
+    def _iter_registered_flow_actors(self):
+        if self.flow_actors:
+            for name, record in self.flow_actors.items():
+                yield self._safe_name(name), record["actor"], record["include_links"]
+        else:
+            for name, actor in self._iter_auto_flow_actors():
+                yield name, actor, True
+
+    def _collect_flow_parts(self):
+        part_names, object_names, part_types, actor_ids = [], [], [], []
+        pose_world, pose_wxyz = [], []
+
+        for object_name, actor, include_links in self._iter_registered_flow_actors():
+            if isinstance(actor, ArticulationActor) and include_links:
+                for link_name, link in sorted(actor.get_link_dict().items()):
+                    entity = link.entity
+                    part_names.append(self._safe_name(f"{object_name}__{link_name}"))
+                    object_names.append(object_name)
+                    part_types.append("link")
+                    actor_ids.append(self._safe_entity_id(entity))
+                    pose = link.get_pose()
+                    pose_world.append(self._pose_to_matrix_array(pose))
+                    pose_wxyz.append(self._pose_to_wxyz_array(pose))
+            elif isinstance(actor, ArticulationActor):
+                part_names.append(self._safe_name(object_name))
+                object_names.append(object_name)
+                part_types.append("articulation")
+                actor_ids.append(-1)
+                pose = actor.actor.get_root_pose()
+                pose_world.append(self._pose_to_matrix_array(pose))
+                pose_wxyz.append(self._pose_to_wxyz_array(pose))
+            else:
+                part_names.append(self._safe_name(object_name))
+                object_names.append(object_name)
+                part_types.append("actor")
+                actor_ids.append(self._safe_entity_id(actor.actor))
+                pose = actor.get_pose()
+                pose_world.append(self._pose_to_matrix_array(pose))
+                pose_wxyz.append(self._pose_to_wxyz_array(pose))
+
+        if not part_names:
+            return {
+                "actor_ids": np.zeros((0,), dtype=np.int32),
+                "part_names": np.zeros((0,), dtype="S128"),
+                "object_names": np.zeros((0,), dtype="S128"),
+                "part_types": np.zeros((0,), dtype="S32"),
+                "pose_world": np.zeros((0, 4, 4), dtype=np.float32),
+                "pose_wxyz": np.zeros((0, 7), dtype=np.float32),
+            }
+
+        return {
+            "actor_ids": np.asarray(actor_ids, dtype=np.int32),
+            "part_names": self._bytes_array(part_names, width=128),
+            "object_names": self._bytes_array(object_names, width=128),
+            "part_types": self._bytes_array(part_types, width=32),
+            "pose_world": np.asarray(pose_world, dtype=np.float32),
+            "pose_wxyz": np.asarray(pose_wxyz, dtype=np.float32),
+        }
+
+    def _collect_robot_state(self):
+        joint_names, qpos = [], []
+        seen_entities = set()
+        robot_part_names, robot_actor_ids, robot_pose_world, robot_pose_wxyz = [], [], [], []
+        left_robot_actor_ids, right_robot_actor_ids = [], []
+
+        for side, entity in (("left", self.robot.left_entity), ("right", self.robot.right_entity)):
+            for link in entity.get_links():
+                actor_id = self._safe_entity_id(link.entity)
+                if side == "left":
+                    left_robot_actor_ids.append(actor_id)
+                else:
+                    right_robot_actor_ids.append(actor_id)
+                robot_actor_ids.append(actor_id)
+                robot_part_names.append(self._safe_name(f"{side}__{link.get_name()}"))
+                pose = link.get_pose()
+                robot_pose_world.append(self._pose_to_matrix_array(pose))
+                robot_pose_wxyz.append(self._pose_to_wxyz_array(pose))
+
+        for side, entity in (("left", self.robot.left_entity), ("right", self.robot.right_entity)):
+            if id(entity) in seen_entities:
+                continue
+            seen_entities.add(id(entity))
+            active_joints = entity.get_active_joints()
+            entity_qpos = np.asarray(entity.get_qpos(), dtype=np.float32)
+            for idx, joint in enumerate(active_joints):
+                joint_name = joint.get_name() if hasattr(joint, "get_name") else getattr(joint, "name", f"{side}_joint_{idx}")
+                joint_names.append(joint_name)
+                qpos.append(entity_qpos[idx])
+
+        try:
+            base_pose = self.robot.left_entity.get_root_pose()
+        except Exception:
+            base_pose = self.robot.left_entity_origion_pose
+
+        return {
+            "joint_names": self._bytes_array(joint_names, width=96),
+            "joint_positions": np.asarray(qpos, dtype=np.float32),
+            "base_pose_wxyz": self._pose_to_wxyz_array(base_pose),
+            "base_pose_world": self._pose_to_matrix_array(base_pose),
+            "left_gripper_open": np.asarray(self.robot.get_left_gripper_val(), dtype=np.float32),
+            "right_gripper_open": np.asarray(self.robot.get_right_gripper_val(), dtype=np.float32),
+            "left_robot_actor_ids": np.asarray(left_robot_actor_ids, dtype=np.int32),
+            "right_robot_actor_ids": np.asarray(right_robot_actor_ids, dtype=np.int32),
+            "robot_actor_ids": np.asarray(robot_actor_ids, dtype=np.int32),
+            "robot_actor_ids_unique": np.asarray(sorted(set(robot_actor_ids)), dtype=np.int32),
+            "robot_part_names": self._bytes_array(robot_part_names, width=128),
+            "robot_pose_world": np.asarray(robot_pose_world, dtype=np.float32),
+            "robot_pose_wxyz": np.asarray(robot_pose_wxyz, dtype=np.float32),
+        }
 
     def check_stable(self):
         actors_list, actors_pose_list = [], []
@@ -459,6 +630,18 @@ class Base_Task(gym.Env):
             mesh_segmentation = self.cameras.get_segmentation(level="mesh")
             for camera_name in mesh_segmentation.keys():
                 pkl_dic["observation"][camera_name].update(mesh_segmentation[camera_name])
+        # Raw SAPIEN ids are needed for GT flow; the colorized segmentation image is not enough.
+        if self.data_type.get("raw_segmentation", False):
+            raw_mesh_segmentation = self.cameras.get_raw_segmentation(level="mesh")
+            raw_actor_segmentation = self.cameras.get_raw_segmentation(level="actor")
+            for camera_name in raw_mesh_segmentation.keys():
+                pkl_dic["observation"][camera_name]["raw_mesh_segmentation"] = raw_mesh_segmentation[camera_name][
+                    "mesh_segmentation"
+                ].astype(np.int32)
+            for camera_name in raw_actor_segmentation.keys():
+                pkl_dic["observation"][camera_name]["raw_actor_segmentation"] = raw_actor_segmentation[camera_name][
+                    "actor_segmentation"
+                ].astype(np.int32)
         # actor_segmentation
         if self.data_type.get("actor_segmentation", False):
             actor_segmentation = self.cameras.get_segmentation(level="actor")
@@ -469,6 +652,14 @@ class Base_Task(gym.Env):
             depth = self.cameras.get_depth()
             for camera_name in depth.keys():
                 pkl_dic["observation"][camera_name].update(depth[camera_name])
+        if self.data_type.get("position", False):
+            position = self.cameras.get_position()
+            for camera_name in position.keys():
+                pkl_dic["observation"][camera_name].update(position[camera_name])
+        if self.data_type.get("normal", False) or self.pointworld_behavior_online:
+            normal = self.cameras.get_normal()
+            for camera_name in normal.keys():
+                pkl_dic["observation"][camera_name].update(normal[camera_name])
         # endpose
         if self.data_type.get("endpose", False):
             norm_gripper_val = [
@@ -492,6 +683,10 @@ class Base_Task(gym.Env):
             pkl_dic["joint_action"]["right_arm"] = right_jointstate[:-1]
             pkl_dic["joint_action"]["right_gripper"] = right_jointstate[-1]
             pkl_dic["joint_action"]["vector"] = np.array(left_jointstate + right_jointstate)
+        if self.data_type.get("object_pose", False):
+            pkl_dic["flow_parts"] = self._collect_flow_parts()
+        if self.data_type.get("robot_state", False):
+            pkl_dic["robot_state"] = self._collect_robot_state()
         # pointcloud
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
@@ -512,16 +707,32 @@ class Base_Task(gym.Env):
         print("saving: episode = ", self.ep_num, " index = ", self.FRAME_IDX, end="\r")
 
         if self.FRAME_IDX == 0:
-            self.folder_path = {"cache": f"{self.save_dir}/.cache/episode{self.ep_num}/"}
+            if self.pointworld_behavior_online:
+                from robotwin_pointworld.online_writer import BehaviorCompactEpisodeWriter
 
-            for directory in self.folder_path.values():  # remove previous data
-                if os.path.exists(directory):
-                    file_list = os.listdir(directory)
-                    for file in file_list:
-                        os.remove(directory + file)
+                target_file_path = f"{self.save_dir}/data/episode{self.ep_num}.hdf5"
+                self.pointworld_online_writer = BehaviorCompactEpisodeWriter(
+                    output_h5_path=target_file_path,
+                    clip_len=self.pointworld_online_clip_len,
+                    stride=self.pointworld_online_stride,
+                    camera_name=self.pointworld_online_camera,
+                    min_object_motion=self.pointworld_online_min_object_motion,
+                    max_points_per_part=self.pointworld_online_max_points_per_part,
+                )
+            else:
+                self.folder_path = {"cache": f"{self.save_dir}/.cache/episode{self.ep_num}/"}
+
+                for directory in self.folder_path.values():  # remove previous data
+                    if os.path.exists(directory):
+                        file_list = os.listdir(directory)
+                        for file in file_list:
+                            os.remove(directory + file)
 
         pkl_dic = self.get_obs()
-        save_pkl(self.folder_path["cache"] + f"{self.FRAME_IDX}.pkl", pkl_dic)  # use cache
+        if self.pointworld_behavior_online:
+            self.pointworld_online_writer.append(pkl_dic)
+        else:
+            save_pkl(self.folder_path["cache"] + f"{self.FRAME_IDX}.pkl", pkl_dic)  # use cache
         self.FRAME_IDX += 1
 
     def save_traj_data(self, idx):
@@ -534,13 +745,24 @@ class Base_Task(gym.Env):
 
     def load_tran_data(self, idx):
         assert self.save_dir is not None, "self.save_dir is None"
-        file_path = os.path.join(self.save_dir, "_traj_data", f"episode{idx}.pkl")
+        source_dir = self.traj_source_dir or self.save_dir
+        file_path = os.path.join(source_dir, "_traj_data", f"episode{idx}.pkl")
         with open(file_path, "rb") as f:
             traj_data = pickle.load(f)
         return traj_data
 
     def merge_pkl_to_hdf5_video(self):
         if not self.save_data:
+            return
+        if self.pointworld_behavior_online:
+            if self.pointworld_online_writer is not None:
+                self.pointworld_online_writer.close()
+                print(
+                    f"\nSaved compact PointWorld HDF5 to "
+                    f"{self.save_dir}/data/episode{self.ep_num}.hdf5 "
+                    f"({self.pointworld_online_writer.written_clips} clips)."
+                )
+                self.pointworld_online_writer = None
             return
         cache_path = self.folder_path["cache"]
         target_file_path = f"{self.save_dir}/data/episode{self.ep_num}.hdf5"
@@ -551,6 +773,8 @@ class Base_Task(gym.Env):
         process_folder_to_hdf5_video(cache_path, target_file_path, target_video_path)
 
     def remove_data_cache(self):
+        if self.pointworld_behavior_online:
+            return
         folder_path = self.folder_path["cache"]
         GREEN = "\033[92m"
         RED = "\033[91m"
