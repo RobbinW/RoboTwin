@@ -240,7 +240,10 @@ def run(TASK_ENV, args):
             TASK_ENV.close_env(clear_cache=((episode_idx + 1) % clear_cache_freq == 0))
             TASK_ENV.merge_pkl_to_hdf5_video()
             TASK_ENV.remove_data_cache()
-            assert success, "Collect Error"
+            if not success:
+                print(f"\033[93mWarning: replay episode {episode_idx} did not pass check_success(); data was still saved.\033[0m")
+                if not args.get("data_type", {}).get("pointworld_behavior_online", False):
+                    assert success, "Collect Error"
 
         command = f"cd description && bash gen_episode_instructions.sh {args['task_name']} {args['task_config']} {args['language_num']}"
         os.system(command)
