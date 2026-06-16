@@ -52,6 +52,9 @@ The config uses head camera only and builds clips from the saved observation str
 - `pointworld_clip_len: 16`: each compact clip contains 16 training frames.
 - `pointworld_frame_interval: 2`: clip frames are sampled as `start, start+2, ..., start+30` from saved observations.
 - `pointworld_stride: 10`: consecutive clip starts are 10 saved-observation frames apart, so clips overlap.
+- Final residual windows are kept: if the episode ends before a full window is available,
+  the writer pads by repeating the last saved observation. Padded frames are marked by
+  `source_frame_is_padding`.
 - `pointworld_min_object_motion: 0.0`: no motion-based clip filtering is applied.
 
 It writes:
@@ -121,6 +124,8 @@ source_traj_start_frame          int
 source_traj_end_frame            int
 source_frame_interval            int, 2
 source_clip_stride               int, 10
+source_is_padded_clip            bool
+source_num_padding_frames        int, number of sampled clip frames that were padded
 ```
 
 Clip datasets:
@@ -136,6 +141,12 @@ source_traj_frame_indices        (T,) int64
 
 source_save_freq                 (T,) int64
   The save_freq value for each source frame, usually 15.
+
+source_frame_is_padding          (T,) bool
+  True for clip frames created by repeating the final saved observation. Example for
+  the final padded clip: source_demo_clean_frame_indices =
+  [120, 122, ..., 142, 143, 143, 143, 143] and source_frame_is_padding =
+  [false, false, ..., false, true, true, true, true].
 
 joint_positions                  (T, D) float32
   Robot qpos / joint state per clip frame.
@@ -176,8 +187,22 @@ camera_head/initial_rgb          (1,) bytes
 camera_head/initial_depth        (H, W) uint16
   First-frame depth in millimeters.
 
-camera_head/scene_robot_mask     (N,) bool
-  True for points that come from robot links. Robot points are kept, not filtered.
+camera_head/scene_part_names        (P,) bytes/string
+  Ordered part names. This order is the source of truth for decoding local scene
+  groups and trajectories.
+
+camera_head/scene_part_is_robot     (P,) bool
+  True if the corresponding part is a robot link. This is the source of truth
+  for optionally including or excluding robot scene points during decoding.
+
+camera_head/scene_part_category     (P,) bytes/string
+  Part category: task_object, robot, or static.
+
+camera_head/scene_part_actor_id     (P,) int32
+  SAPIEN actor id for each part.
+
+camera_head/scene_part_point_count  (P,) int32
+  Number of frame-0 visible points saved for each part.
 ```
 
 Compact scene groups:
@@ -206,9 +231,10 @@ scene_flows       (T, N, 3) float32
 scene_colors      (T, N, 3) uint8
 scene_normals     (T, N, 3) float32
 scene_visibility  (T, N) bool
+scene_robot_mask  (N,) bool
 ```
 
-They are decoded online by applying each part's `scene_mesh_trajectories` to its fixed `local_scene_points`. This is the same storage idea as BEHAVIOR/PointWorld: save local points plus pose trajectories, not the large dense flow tensor.
+They are decoded online by applying each part's `scene_mesh_trajectories` to its fixed `local_scene_points`. `scene_robot_mask` is derived from `scene_part_is_robot` and `scene_part_point_count`; it is not saved as a redundant HDF5 dataset. This is the same storage idea as BEHAVIOR/PointWorld: save local points plus pose trajectories, not the large dense flow tensor.
 
 ## Export WDS
 
@@ -232,5 +258,15 @@ cd /data/dex/RoboTwin
   --h5 data/adjust_bottle/pointworld_behavior_compact_head/data/episode0.hdf5 \
   --port 8099
 ```
+
+/data/dex/conda-envs/pointworld-env/bin/python script/serve_robotwin_pointworld_flow_viser.py \
+  --h5 /data/dex/RoboTwin/data/episode1.hdf5 \
+  --port 8099
+
+/data/dex/conda-envs/pointworld-env/bin/python script/serve_robotwin_pointworld_flow_viser.py \
+  --h5 /data/dex/RoboTwin/data/stack_bowls_two/pointworld_behavior_compact_head/data/episode0.hdf5 \
+  --port 8099
+
+
 
 The viewer decodes dense `scene_flows` online from `local_scene_points` and `scene_mesh_trajectories`; the dense flow is not stored in the compact H5.

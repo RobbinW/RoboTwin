@@ -50,11 +50,15 @@ class PointWorldCameraClip:
     local_scene_colors: dict[str, np.ndarray]
     local_scene_normals: dict[str, np.ndarray]
     scene_mesh_trajectories: dict[str, np.ndarray]
+    scene_part_names: list[str]
+    scene_part_is_robot: np.ndarray
+    scene_part_category: list[str]
+    scene_part_actor_id: np.ndarray
+    scene_part_point_count: np.ndarray
     scene_flows: np.ndarray
     scene_colors: np.ndarray
     scene_normals: np.ndarray
     scene_visibility: np.ndarray
-    scene_robot_mask: np.ndarray
     object_names: list[str]
 
 
@@ -151,7 +155,7 @@ def _save_depth_uint16_mm(group: h5py.Group, name: str, depth_m: np.ndarray) -> 
 
 
 def _create_group_arrays(parent: h5py.Group, name: str, arrays: dict[str, np.ndarray], dtype=None) -> None:
-    group = parent.create_group(name)
+    group = parent.create_group(name, track_order=True)
     for key, value in arrays.items():
         data = np.asarray(value, dtype=dtype) if dtype is not None else np.asarray(value)
         dset = group.create_dataset(key, data=data)
@@ -307,8 +311,13 @@ def build_pointworld_camera_clip(
     local_scene_colors: dict[str, np.ndarray] = {}
     local_scene_normals: dict[str, np.ndarray] = {}
     scene_mesh_trajectories: dict[str, np.ndarray] = {}
+    scene_part_names: list[str] = []
+    scene_part_is_robot: list[bool] = []
+    scene_part_category: list[str] = []
+    scene_part_actor_id: list[int] = []
+    scene_part_point_count: list[int] = []
     object_name_list: list[str] = []
-    flow_chunks, color_chunks, normal_chunks, robot_mask_chunks = [], [], [], []
+    flow_chunks, color_chunks, normal_chunks = [], [], []
 
     used_actor_ids: set[int] = set()
     for part_idx, actor_id in enumerate(actor_ids.tolist()):
@@ -340,11 +349,15 @@ def build_pointworld_camera_clip(
         local_scene_colors[part_name] = colors_part
         local_scene_normals[part_name] = local_normals
         scene_mesh_trajectories[part_name] = traj_poses
+        scene_part_names.append(part_name)
+        scene_part_is_robot.append(False)
+        scene_part_category.append("task_object")
+        scene_part_actor_id.append(int(actor_id))
+        scene_part_point_count.append(int(local_points.shape[0]))
         object_name_list.append(object_name)
         flow_chunks.append(flows)
         color_chunks.append(colors)
         normal_chunks.append(normals)
-        robot_mask_chunks.append(np.zeros((flows.shape[1],), dtype=bool))
         used_actor_ids.add(int(actor_id))
 
     robot_actor_id_set = {int(v) for v in robot_actor_ids.tolist() if int(v) >= 0}
@@ -377,11 +390,15 @@ def build_pointworld_camera_clip(
         local_scene_colors[part_name] = colors_part
         local_scene_normals[part_name] = local_normals
         scene_mesh_trajectories[part_name] = traj_poses
+        scene_part_names.append(part_name)
+        scene_part_is_robot.append(True)
+        scene_part_category.append("robot")
+        scene_part_actor_id.append(int(actor_id))
+        scene_part_point_count.append(int(local_points.shape[0]))
         object_name_list.append(part_name)
         flow_chunks.append(flows)
         color_chunks.append(colors)
         normal_chunks.append(normals)
-        robot_mask_chunks.append(np.ones((flows.shape[1],), dtype=bool))
         used_actor_ids.add(int(actor_id))
 
     if include_untracked_static:
@@ -412,22 +429,24 @@ def build_pointworld_camera_clip(
             local_scene_colors[part_name] = colors_part
             local_scene_normals[part_name] = local_normals
             scene_mesh_trajectories[part_name] = static_pose_pw
+            scene_part_names.append(part_name)
+            scene_part_is_robot.append(False)
+            scene_part_category.append("static")
+            scene_part_actor_id.append(int(actor_id))
+            scene_part_point_count.append(int(local_points.shape[0]))
             object_name_list.append(part_name)
             flow_chunks.append(flows)
             color_chunks.append(colors)
             normal_chunks.append(normals)
-            robot_mask_chunks.append(np.zeros((flows.shape[1],), dtype=bool))
 
     if flow_chunks:
         scene_flows = np.concatenate(flow_chunks, axis=1).astype(np.float32)
         scene_colors = np.concatenate(color_chunks, axis=1).astype(np.uint8)
         scene_normals = np.concatenate(normal_chunks, axis=1).astype(np.float32)
-        scene_robot_mask = np.concatenate(robot_mask_chunks, axis=0).astype(bool)
     else:
         scene_flows = np.zeros((pose_world_traj.shape[0], 0, 3), dtype=np.float32)
         scene_colors = np.zeros((pose_world_traj.shape[0], 0, 3), dtype=np.uint8)
         scene_normals = np.zeros((pose_world_traj.shape[0], 0, 3), dtype=np.float32)
-        scene_robot_mask = np.zeros((0,), dtype=bool)
 
     scene_visibility = np.ones(scene_flows.shape[:2], dtype=bool)
 
@@ -436,11 +455,15 @@ def build_pointworld_camera_clip(
         local_scene_colors=local_scene_colors,
         local_scene_normals=local_scene_normals,
         scene_mesh_trajectories=scene_mesh_trajectories,
+        scene_part_names=scene_part_names,
+        scene_part_is_robot=np.asarray(scene_part_is_robot, dtype=bool),
+        scene_part_category=scene_part_category,
+        scene_part_actor_id=np.asarray(scene_part_actor_id, dtype=np.int32),
+        scene_part_point_count=np.asarray(scene_part_point_count, dtype=np.int32),
         scene_flows=scene_flows,
         scene_colors=scene_colors,
         scene_normals=scene_normals,
         scene_visibility=scene_visibility,
-        scene_robot_mask=scene_robot_mask,
         object_names=sorted(set(object_name_list)),
     )
 
@@ -456,13 +479,17 @@ def _write_camera_clip_group(
     extrinsic: np.ndarray,
     extrinsic_trajectory: np.ndarray,
 ) -> None:
-    camera_group = clip_group.create_group(camera_group_name)
+    camera_group = clip_group.create_group(camera_group_name, track_order=True)
     _create_group_arrays(camera_group, "local_scene_points", camera_clip.local_scene_points, dtype=np.float16)
     _create_group_arrays(camera_group, "local_scene_colors", camera_clip.local_scene_colors, dtype=np.uint8)
     local_normals_i8 = {name: _quantize_normals_to_int8(normals) for name, normals in camera_clip.local_scene_normals.items()}
     _create_group_arrays(camera_group, "local_scene_normals", local_normals_i8, dtype=np.int8)
     _create_group_arrays(camera_group, "scene_mesh_trajectories", camera_clip.scene_mesh_trajectories, dtype=np.float32)
-    camera_group.create_dataset("scene_robot_mask", data=camera_clip.scene_robot_mask)
+    camera_group.create_dataset("scene_part_names", data=np.asarray(camera_clip.scene_part_names, dtype="S128"))
+    camera_group.create_dataset("scene_part_is_robot", data=camera_clip.scene_part_is_robot, dtype=bool)
+    camera_group.create_dataset("scene_part_category", data=np.asarray(camera_clip.scene_part_category, dtype="S32"))
+    camera_group.create_dataset("scene_part_actor_id", data=camera_clip.scene_part_actor_id, dtype=np.int32)
+    camera_group.create_dataset("scene_part_point_count", data=camera_clip.scene_part_point_count, dtype=np.int32)
 
     rgb_norm, depth_norm, intrinsic_norm = _normalize_camera_payload(initial_rgb, initial_depth_m, intrinsic)
     camera_group.create_dataset("intrinsic", data=intrinsic_norm, dtype=np.float32)

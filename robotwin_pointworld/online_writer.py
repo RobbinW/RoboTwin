@@ -86,11 +86,30 @@ class BehaviorCompactEpisodeWriter:
     def close(self) -> None:
         if self._closed:
             return
+        if self._frames:
+            padded_frames = self._pad_residual_frames(self._frames)
+            sampled_frames = padded_frames[: self.required_input_frames : self.frame_interval]
+            self._write_clip(sampled_frames)
+            self._frames.clear()
         self._h5.attrs["num_clips"] = int(self._written)
         self._h5.attrs["episode_complete"] = True
         self._h5.flush()
         self._h5.close()
         self._closed = True
+
+    def _pad_residual_frames(self, frames: list[dict]) -> list[dict]:
+        if len(frames) >= self.required_input_frames:
+            return frames[: self.required_input_frames]
+        padded = list(frames)
+        pad_count = self.required_input_frames - len(padded)
+        last_frame = padded[-1]
+        for _ in range(pad_count):
+            frame = dict(last_frame)
+            metadata = dict(frame.get("frame_metadata", {}))
+            metadata["pointworld_is_padding"] = True
+            frame["frame_metadata"] = metadata
+            padded.append(frame)
+        return padded
 
     def _write_clip(self, frames: list[dict]) -> None:
         if len(frames) != self.clip_len:
@@ -150,7 +169,7 @@ class BehaviorCompactEpisodeWriter:
         )
 
         clip_key = f"{self.output_h5_path.stem}:clip{self._written:06d}"
-        clip_group = self._h5.create_group(clip_key)
+        clip_group = self._h5.create_group(clip_key, track_order=True)
         self._write_source_frame_metadata(clip_group, frames)
         extrinsic = _as_homogeneous_extrinsic(raw_camera["extrinsic_cv"]) @ base_world_traj[0]
         extrinsic_traj = np.asarray(
@@ -219,15 +238,22 @@ class BehaviorCompactEpisodeWriter:
             [int(frame.get("frame_metadata", {}).get("save_freq", -1)) for frame in frames],
             dtype=np.int64,
         )
+        is_padding = np.asarray(
+            [bool(frame.get("frame_metadata", {}).get("pointworld_is_padding", False)) for frame in frames],
+            dtype=bool,
+        )
         clip_group.create_dataset("source_demo_clean_frame_indices", data=demo_indices, dtype=np.int64)
         clip_group.create_dataset("source_traj_frame_indices", data=traj_indices, dtype=np.int64)
         clip_group.create_dataset("source_save_freq", data=save_freqs, dtype=np.int64)
+        clip_group.create_dataset("source_frame_is_padding", data=is_padding, dtype=bool)
         clip_group.attrs["source_demo_clean_start_frame"] = int(demo_indices[0]) if demo_indices.size else -1
         clip_group.attrs["source_demo_clean_end_frame"] = int(demo_indices[-1]) if demo_indices.size else -1
         clip_group.attrs["source_traj_start_frame"] = int(traj_indices[0]) if traj_indices.size else -1
         clip_group.attrs["source_traj_end_frame"] = int(traj_indices[-1]) if traj_indices.size else -1
         clip_group.attrs["source_frame_interval"] = int(self.frame_interval)
         clip_group.attrs["source_clip_stride"] = int(self.stride)
+        clip_group.attrs["source_is_padded_clip"] = bool(np.any(is_padding))
+        clip_group.attrs["source_num_padding_frames"] = int(np.count_nonzero(is_padding))
 
     def _stack_robot_matrix(self, frames: list[dict], key: str, fallback: np.ndarray) -> np.ndarray:
         values = []

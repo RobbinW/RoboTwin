@@ -502,7 +502,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera", type=str, default="camera_head")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8099)
-    parser.add_argument("--max_points", type=int, default=2048)
+    parser.add_argument("--max_points", type=int, default=10000)
     parser.add_argument("--point_size", type=float, default=0.006)
     parser.add_argument("--line_width", type=float, default=2.0)
     parser.add_argument("--fps", type=float, default=4.0)

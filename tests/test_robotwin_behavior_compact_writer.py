@@ -2,6 +2,7 @@ import h5py
 import numpy as np
 
 from robotwin_pointworld.behavior_online import decode_behavior_online_camera_group
+from robotwin_pointworld.compact import _create_group_arrays
 from robotwin_pointworld.online_writer import BehaviorCompactEpisodeWriter
 
 
@@ -84,6 +85,20 @@ def test_behavior_compact_episode_writer_streams_frames_to_compact_h5(tmp_path):
         assert list(f.keys()) == ["episode0:clip000000"]
         cam = f["episode0:clip000000"]["camera_head"]
         assert "scene_flows" not in cam
+        assert "scene_robot_mask" not in cam
+        assert [v.decode("utf-8") for v in cam["scene_part_names"][:]] == [
+            "bottle",
+            "robot__right_link",
+            "static_actor_6",
+        ]
+        np.testing.assert_array_equal(cam["scene_part_is_robot"][:], [False, True, False])
+        assert [v.decode("utf-8") for v in cam["scene_part_category"][:]] == [
+            "task_object",
+            "robot",
+            "static",
+        ]
+        np.testing.assert_array_equal(cam["scene_part_actor_id"][:], [5, 99, 6])
+        np.testing.assert_array_equal(cam["scene_part_point_count"][:], [1, 1, 1])
         assert cam["local_scene_points"]["bottle"].dtype == np.float16
         decoded = decode_behavior_online_camera_group(cam)
         assert decoded.scene_flows.shape == (15, 3, 3)
@@ -109,11 +124,14 @@ def test_behavior_compact_episode_writer_uses_frame_interval_and_source_metadata
     writer.close()
 
     with h5py.File(out_path, "r") as f:
-        assert list(f.keys()) == ["episode0:clip000000", "episode0:clip000001"]
+        assert list(f.keys()) == ["episode0:clip000000", "episode0:clip000001", "episode0:clip000002"]
 
         clip0 = f["episode0:clip000000"]
         np.testing.assert_array_equal(clip0["source_demo_clean_frame_indices"][:], [0, 2, 4, 6])
         np.testing.assert_array_equal(clip0["source_traj_frame_indices"][:], [0, 30, 60, 90])
+        np.testing.assert_array_equal(clip0["source_frame_is_padding"][:], [False, False, False, False])
+        assert not bool(clip0.attrs["source_is_padded_clip"])
+        assert clip0.attrs["source_num_padding_frames"] == 0
         assert clip0.attrs["source_demo_clean_start_frame"] == 0
         assert clip0.attrs["source_demo_clean_end_frame"] == 6
         assert clip0.attrs["source_traj_start_frame"] == 0
@@ -124,5 +142,42 @@ def test_behavior_compact_episode_writer_uses_frame_interval_and_source_metadata
         clip1 = f["episode0:clip000001"]
         np.testing.assert_array_equal(clip1["source_demo_clean_frame_indices"][:], [2, 4, 6, 8])
         np.testing.assert_array_equal(clip1["source_traj_frame_indices"][:], [30, 60, 90, 120])
+        np.testing.assert_array_equal(clip1["source_frame_is_padding"][:], [False, False, False, False])
         decoded = decode_behavior_online_camera_group(clip1["camera_head"])
         assert decoded.scene_flows.shape == (4, 3, 3)
+
+        clip2 = f["episode0:clip000002"]
+        np.testing.assert_array_equal(clip2["source_demo_clean_frame_indices"][:], [4, 6, 8, 8])
+        np.testing.assert_array_equal(clip2["source_traj_frame_indices"][:], [60, 90, 120, 120])
+        np.testing.assert_array_equal(clip2["source_frame_is_padding"][:], [False, False, False, True])
+        assert bool(clip2.attrs["source_is_padded_clip"])
+        assert clip2.attrs["source_num_padding_frames"] == 1
+        assert clip2.attrs["source_demo_clean_start_frame"] == 4
+        assert clip2.attrs["source_demo_clean_end_frame"] == 8
+        decoded = decode_behavior_online_camera_group(clip2["camera_head"])
+        assert decoded.scene_flows.shape == (4, 3, 3)
+        np.testing.assert_allclose(decoded.scene_flows[-1], decoded.scene_flows[-2])
+
+
+def test_create_group_arrays_preserves_insertion_order(tmp_path):
+    out_path = tmp_path / "ordered_groups.hdf5"
+
+    with h5py.File(out_path, "w") as f:
+        _create_group_arrays(
+            f,
+            "local_scene_points",
+            {
+                "z_object": np.zeros((1, 3), dtype=np.float32),
+                "robot__link": np.zeros((1, 3), dtype=np.float32),
+                "static_actor_5": np.zeros((1, 3), dtype=np.float32),
+                "a_object": np.zeros((1, 3), dtype=np.float32),
+            },
+        )
+
+    with h5py.File(out_path, "r") as f:
+        assert list(f["local_scene_points"].keys()) == [
+            "z_object",
+            "robot__link",
+            "static_actor_5",
+            "a_object",
+        ]

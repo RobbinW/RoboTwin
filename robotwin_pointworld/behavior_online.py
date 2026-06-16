@@ -57,8 +57,48 @@ def pointworld_pose_to_matrix(pose_xyzw: np.ndarray) -> np.ndarray:
     return matrix
 
 
-def _decode_part_names(group) -> list[str]:
-    return [str(name) for name in group.keys()]
+def _decode_bytes(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8").rstrip("\x00")
+    if hasattr(value, "decode"):
+        return value.decode("utf-8").rstrip("\x00")
+    return str(value).rstrip("\x00")
+
+
+def _decode_string_dataset(dataset) -> list[str]:
+    return [_decode_bytes(value) for value in np.asarray(dataset[:]).tolist()]
+
+
+def _decode_part_names(camera_group, local_points_group) -> list[str]:
+    if "scene_part_names" in camera_group:
+        part_names = _decode_string_dataset(camera_group["scene_part_names"])
+        missing = [name for name in part_names if name not in local_points_group]
+        if missing:
+            raise KeyError(f"scene_part_names references missing local_scene_points part(s): {missing}")
+        return part_names
+    return [str(name) for name in local_points_group.keys()]
+
+
+def _decode_part_is_robot(camera_group, part_names: list[str]) -> list[bool]:
+    if "scene_part_is_robot" in camera_group:
+        values = np.asarray(camera_group["scene_part_is_robot"][:], dtype=bool)
+        if values.shape != (len(part_names),):
+            raise ValueError(
+                f"scene_part_is_robot must have shape ({len(part_names)},), got {values.shape}."
+            )
+        return [bool(value) for value in values.tolist()]
+    return [_is_robot_part_name(name) for name in part_names]
+
+
+def _decode_part_point_counts(camera_group, part_names: list[str]) -> list[int] | None:
+    if "scene_part_point_count" not in camera_group:
+        return None
+    values = np.asarray(camera_group["scene_part_point_count"][:], dtype=np.int64)
+    if values.shape != (len(part_names),):
+        raise ValueError(
+            f"scene_part_point_count must have shape ({len(part_names)},), got {values.shape}."
+        )
+    return [int(value) for value in values.tolist()]
 
 
 def _read_part_array(group, part_name: str, fallback_shape: tuple[int, ...], dtype) -> np.ndarray:
@@ -72,6 +112,10 @@ def _decode_normals(normals: np.ndarray) -> np.ndarray:
     if normals.dtype == np.int8:
         return normals.astype(np.float32) / 127.0
     return normals.astype(np.float32)
+
+
+def _is_robot_part_name(part_name: str) -> bool:
+    return part_name.startswith(("robot__", "robot0_", "gripper0_", "mount0_", "base0_"))
 
 
 def decode_behavior_online_camera_group(camera_group) -> BehaviorOnlineCameraFlow:
@@ -92,13 +136,20 @@ def decode_behavior_online_camera_group(camera_group) -> BehaviorOnlineCameraFlo
     normal_chunks: list[np.ndarray] = []
     robot_mask_chunks: list[np.ndarray] = []
     part_slices: dict[str, slice] = {}
-    part_names: list[str] = []
+    part_names = _decode_part_names(camera_group, local_points_group)
+    part_is_robot = _decode_part_is_robot(camera_group, part_names)
+    part_point_counts = _decode_part_point_counts(camera_group, part_names)
     offset = 0
 
-    for part_name in _decode_part_names(local_points_group):
+    for part_idx, part_name in enumerate(part_names):
         if part_name not in trajectories_group:
             raise KeyError(f"Missing trajectory for local scene part '{part_name}'.")
         local_points = np.asarray(local_points_group[part_name][:], dtype=np.float32)
+        if part_point_counts is not None and local_points.shape[0] != part_point_counts[part_idx]:
+            raise ValueError(
+                f"scene_part_point_count for '{part_name}' is {part_point_counts[part_idx]}, "
+                f"but local_scene_points has {local_points.shape[0]} points."
+            )
         trajectory_poses = np.asarray(trajectories_group[part_name][:], dtype=np.float32)
         if trajectory_poses.ndim != 2 or trajectory_poses.shape[1] != 7:
             raise ValueError(
@@ -117,9 +168,8 @@ def decode_behavior_online_camera_group(camera_group) -> BehaviorOnlineCameraFlo
         flow_chunks.append(flows)
         color_chunks.append(colors)
         normal_chunks.append(normals)
-        robot_mask_chunks.append(np.full((local_points.shape[0],), part_name.startswith("robot__"), dtype=bool))
+        robot_mask_chunks.append(np.full((local_points.shape[0],), part_is_robot[part_idx], dtype=bool))
         part_slices[part_name] = slice(offset, offset + local_points.shape[0])
-        part_names.append(part_name)
         offset += local_points.shape[0]
 
     if flow_chunks:

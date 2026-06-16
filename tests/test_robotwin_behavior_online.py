@@ -58,8 +58,8 @@ def test_decode_behavior_online_camera_group_reconstructs_flows_from_local_point
     assert decoded.scene_visibility.all()
 
 
-def test_decode_behavior_online_camera_group_derives_robot_mask_from_online_part_order(tmp_path):
-    h5_path = tmp_path / "behavior_online_robot_mask.h5"
+def test_decode_behavior_online_camera_group_uses_part_metadata_for_order_and_robot_flags(tmp_path):
+    h5_path = tmp_path / "behavior_online_part_metadata.h5"
     identity_traj = np.array([
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
@@ -67,14 +67,19 @@ def test_decode_behavior_online_camera_group_derives_robot_mask_from_online_part
     with h5py.File(h5_path, "w") as f:
         camera = f.create_group("camera_head")
         local_points = camera.create_group("local_scene_points")
+        local_points.create_dataset("arm_link", data=np.ones((2, 3), dtype=np.float32))
         local_points.create_dataset("object", data=np.zeros((1, 3), dtype=np.float32))
-        local_points.create_dataset("robot__link", data=np.ones((2, 3), dtype=np.float32))
         trajectories = camera.create_group("scene_mesh_trajectories")
         trajectories.create_dataset("object", data=identity_traj)
-        trajectories.create_dataset("robot__link", data=identity_traj)
-        camera.create_dataset("scene_robot_mask", data=np.array([True, False, False], dtype=bool))
+        trajectories.create_dataset("arm_link", data=identity_traj)
+        camera.create_dataset("scene_part_names", data=np.asarray([b"object", b"arm_link"]))
+        camera.create_dataset("scene_part_is_robot", data=np.asarray([False, True], dtype=bool))
+        camera.create_dataset("scene_part_category", data=np.asarray([b"task_object", b"robot"]))
+        camera.create_dataset("scene_part_actor_id", data=np.asarray([5, 99], dtype=np.int32))
+        camera.create_dataset("scene_part_point_count", data=np.asarray([1, 2], dtype=np.int32))
 
     with h5py.File(h5_path, "r") as f:
         decoded = decode_behavior_online_camera_group(f["camera_head"])
 
     np.testing.assert_array_equal(decoded.scene_robot_mask, [False, True, True])
+    assert decoded.part_names == ["object", "arm_link"]
