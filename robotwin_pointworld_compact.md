@@ -250,6 +250,110 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u al
 
 The wrapper runs PointWorld-data integrity check, manifest generation, then `convert_wds.py --domain robotwin`.
 
+## Export 3DWAM WDS
+
+For 3DWAM training, `script/robotwin_h5_to_wds.py` converts compact RobotWin PointWorld H5 clips into WebDataset shards directly.
+
+Expected input layout:
+
+```text
+<input_dir>/<task>/<task_config>/data/episode<N>.hdf5
+```
+
+Example:
+
+```bash
+cd /data/dex/Pointworld_RoboTwin
+/data/dex/conda-envs/pointworld-env/bin/python script/robotwin_h5_to_wds.py \
+  --input_dir /tx-NFS/public_datasets/processed/pointflow_robotwin \
+  --output_dir /data/dex/3dwam/datasets/robotwin_wds \
+  --tasks adjust_bottle,beat_block_hammer \
+  --max_episodes_per_task -1 \
+  --test_percentage 0.1 \
+  --seed 42 \
+  --max_history_horizon 15
+```
+
+The converter writes:
+
+```text
+<output_dir>/train/*.tar
+<output_dir>/test/*.tar
+<output_dir>/manifest.json
+<output_dir>/integrity_check.json
+<output_dir>/metadata_rank0.json
+<output_dir>/train_source_paths_rank0.txt
+<output_dir>/test_source_paths_rank0.txt
+```
+
+Splits are episode-level. All clips from the same `episode<N>.hdf5` go entirely into either `train` or `test`. The default `test_percentage` is `0.1`.
+
+The WDS samples keep the compact PointWorld representation instead of dense scene flows. Scene points are reconstructed online by the 3DWAM decoder from:
+
+```text
+camera_head_local_scene_points.pyd
+camera_head_local_scene_colors.pyd
+camera_head_local_scene_normals.pyd
+camera_head_scene_mesh_trajectories.pyd
+```
+
+Each sample also stores robot and source-frame fields:
+
+```text
+joint_positions.npy
+joint_names.pyd
+base_pose.npy
+left_gripper_open.npy
+left_gripper_pose.npy
+right_gripper_open.npy
+right_gripper_pose.npy
+source_demo_clean_frame_indices.npy
+source_traj_frame_indices.npy
+source_frame_is_padding.npy
+source_save_freq.npy
+robotwin_source_metadata.pyd
+```
+
+### Cached History Robot State
+
+The 3DWAM WDS converter stores a maximum history robot-state window per clip:
+
+```text
+history_joint_positions.npy  # [max_history_horizon + 1, J]
+history_valid_mask.npy       # [max_history_horizon + 1]
+history_raw_indices.npy      # [max_history_horizon + 1]
+```
+
+The default `max_history_horizon` is `15`, so each clip stores `16` robot-state rows. The last row is always the current clip start frame `t0`.
+
+History indices are computed from the clip frame interval:
+
+```text
+t0 = source_demo_clean_frame_indices[0]
+interval = source_demo_clean_frame_indices[1] - source_demo_clean_frame_indices[0]
+history_raw_indices = [t0 - H * interval, ..., t0 - interval, t0]
+```
+
+For example, if a clip starts with:
+
+```text
+source_demo_clean_frame_indices = [20, 22, 24, ...]
+```
+
+then `t0 = 20`, `interval = 2`, and `H = 15` gives:
+
+```text
+[-10, -8, -6, ..., 16, 18, 20]
+```
+
+If a requested history frame does not exist, the converter uses the nearest available non-future frame from the same episode and marks that entry as invalid in `history_valid_mask`. The final entry is forced to the current clip first frame and marked valid.
+
+`history_base_pose.npy` is intentionally not stored. 3DWAM RobotWin FK currently uses the RobotWin URDF/base frame directly and does not apply `base_pose` to FK points.
+
+During 3DWAM training, the dataloader uses these cached history fields first. If the requested `action_flow_history_horizon` is less than or equal to the cached `max_history_horizon`, no original H5 scan is needed. If the WDS is old, missing cached history fields, or the requested horizon is larger than the cached window, the dataloader falls back to the original H5 path from `robotwin_source_metadata` and `--robotwin_h5_root`.
+
+FK gripper points are not stored in WDS. The 3DWAM dataloader samples the left and right gripper surface points at runtime so the current/future `robot_flows` and `history_robot_flows` use the same surface-point tokens.
+
 ## Visualize
 
 ```bash
